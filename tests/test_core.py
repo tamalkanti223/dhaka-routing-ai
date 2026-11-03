@@ -413,5 +413,21 @@ def test_local_conditions_add_and_remove_on_one_stretch():
         apply_local_conditions(sc, both, {"tornado"})
 
 
+def test_map_coverage_reports_extent_extremes_and_area_status():
+    import map_coverage as mc
+    g = make_graph(COORDS, [(1, 2, 1.0, False), (2, 3, 1.0, False), (3, 4, 1.0, False)])
+    info = mc.analyse(g, {1: "A Road", 2: "B Road", 3: "C Road", 4: "D Road", 5: "E Road"})
+    lat = [c[0] for c in COORDS.values()]
+    lon = [c[1] for c in COORDS.values()]
+    assert info["box"] == (min(lat), min(lon), max(lat), max(lon))
+    assert info["extremes"]["north"]["lat"] == max(lat)
+    assert info["extremes"]["east"]["lon"] == max(lon)
+    assert info["n_nodes"] == len(COORDS) and sum(info["cells"].values()) == len(COORDS)
+    # no area of Dhaka lies in this toy graph: every area reports "none"
+    assert {a["status"] for a in info["areas"]} == {"none"}
+    html = mc.build_html(g, info)
+    assert "dashArray" in html or "dash_array" in html or "8 6" in html
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

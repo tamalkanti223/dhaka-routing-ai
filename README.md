@@ -93,6 +93,9 @@ The map is the central-Dhaka extract (`data/dhaka_central_roads.osm`), about
 21 km x 21 km: from Mirpur and the southern edge of Uttara down to Old Dhaka
 and Jatrabari, and from Mohammadpur east to Badda, Rampura and Khilgaon.
 Outer areas such as Savar, Tongi, Gazipur and Narayanganj are not included.
+The **📍 Coverage** view (next to Map / Simulation / Path) shows this on the map:
+the road footprint, the four extreme junctions and which well-known areas are
+covered, only partly covered or absent, all counted from the loaded graph.
 
 Using the app:
 1. **Network:** *Full network* (whole map file) or the small *Central demo

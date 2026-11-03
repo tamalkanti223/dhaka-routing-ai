@@ -31,6 +31,7 @@ from scenarios import (build_scenario, manual_scenario, scenario_stats,
 from cost_function import explain_example
 from heuristics import verify_heuristic
 from search_algorithms import ALGORITHMS, ProblemInstance, run_algorithm, SearchResult
+import map_coverage
 import path_view
 import simulation
 import visualizer as viz
@@ -89,6 +90,13 @@ def get_indexes(osm_file: str, simplify: bool, network: str):
     g = (get_region_graph(osm_file, simplify) if network == REGION
          else get_full_graph(osm_file, simplify))
     return NodeIndex(g), place_index(g), junction_index(g)
+
+
+@st.cache_resource
+def get_coverage(osm_file: str, simplify: bool, network: str) -> dict:
+    g = (get_region_graph(osm_file, simplify) if network == REGION
+         else get_full_graph(osm_file, simplify))
+    return map_coverage.analyse(g, get_node_names(osm_file, simplify, network))
 
 
 @st.cache_resource
@@ -322,6 +330,7 @@ tab_map, tab_compare, tab_edit, tab_about = st.tabs(
 VIEW_MAP = "🗺️ Map"
 VIEW_SIM = "🎬 Simulation"
 VIEW_PATH = "🧭 Path"
+VIEW_COVER = "📍 Coverage"
 
 
 def build_problem() -> ProblemInstance:
@@ -457,7 +466,7 @@ def map_area() -> None:
         st.markdown(f"🟢 **Start:** {node_text('start')}  \n"
                     f"🔴 **Destination:** {node_text('goal')}")
     with top_r:
-        view = st.radio("View", [VIEW_MAP, VIEW_SIM, VIEW_PATH], key="map_view",
+        view = st.radio("View", [VIEW_MAP, VIEW_SIM, VIEW_PATH, VIEW_COVER], key="map_view",
                         horizontal=True, label_visibility="collapsed")
     if st.session_state.map_note:
         st.caption("⚠️ " + st.session_state.map_note)
@@ -480,6 +489,36 @@ def map_area() -> None:
 
     offline = bool(st.session_state.get("offline_tiles", False))
     results = st.session_state.results
+
+    if view == VIEW_COVER:
+        info = get_coverage(osm_file, simplify, network)
+        e = info["extremes"]
+        covered = [a["name"] for a in info["areas"] if a["status"] == "covered"]
+        thin = [a["name"] for a in info["areas"] if a["status"] == "thin"]
+        none = [a["name"] for a in info["areas"] if a["status"] == "none"]
+        st.markdown(
+            f"**This map spans about {info['width_km']:.0f} km (west–east) × "
+            f"{info['height_km']:.0f} km (south–north)** — {info['n_nodes']:,} road "
+            f"junctions. Northmost: *{e['north']['road']}*; southmost: "
+            f"*{e['south']['road']}*; eastmost: *{e['east']['road']}*; westmost: "
+            f"*{e['west']['road']}*.")
+        cov_key = (osm_file, network, offline, map_height)
+        cached = st.session_state.get("cover_cache")
+        if cached and cached[0] == cov_key:
+            page = cached[1]
+        else:
+            page = map_coverage.build_html(graph, info, offline, height=map_height)
+            st.session_state.cover_cache = (cov_key, page)
+        show_html(page, map_height + 4)
+        st.markdown(
+            "🟢 **Covered:** " + ", ".join(covered) + "\n\n"
+            + ("🟠 **Only a little:** " + ", ".join(thin) + "\n\n" if thin else "")
+            + ("⚪ **Not in this map:** " + ", ".join(none) if none else ""))
+        st.caption("Blue shading = where road junctions exist (darker = more); red dashed "
+                   "box = the extent; red flags = the four extreme junctions. Area centres "
+                   "are approximate positions used only to count nearby junctions within "
+                   f"{map_coverage.RADIUS_KM:g} km, not official boundaries.")
+        return
 
     if view == VIEW_PATH:
         found = [n for n in simulation.ALGO_ORDER if n in results and results[n].found]
