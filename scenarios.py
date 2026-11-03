@@ -17,6 +17,7 @@ identical costs.
 from __future__ import annotations
 
 import random
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -223,19 +224,20 @@ def with_reverse(graph: RoadGraph, edges: List[Edge]) -> List[Edge]:
     out = {e.eid: e for e in edges}
     for e in edges:
         for back in graph.neighbors(e.v):
-            if back.v == e.u:
+            if back.v == e.u and back.way_id == e.way_id:
                 out[back.eid] = back
     return list(out.values())
 
 
 def apply_local_conditions(sc: Scenario, edges: List[Edge], effects: set,
-                           seed: int = config.GLOBAL_SEED) -> None:
-    """Set ``edges`` to normal day plus the chosen effects (see LOCAL_EFFECTS)."""
+                           seed: int = config.GLOBAL_SEED,
+                           baseline: Dict[int, EdgeAttr] | None = None) -> None:
+    """Apply effects to the selected scenario baseline (normal day by default)."""
     unknown = set(effects) - set(LOCAL_EFFECTS)
     if unknown:
         raise ValueError(f"unknown effects {sorted(unknown)}")
     for e in edges:
-        a = normal_day_attr(e, seed)
+        a = deepcopy(baseline[e.eid]) if baseline is not None else normal_day_attr(e, seed)
         if "rush_hour" in effects:
             a.traffic += 1.4
         if "night" in effects:
@@ -252,7 +254,7 @@ def apply_local_conditions(sc: Scenario, edges: List[Edge], effects: set,
             a.incident = "accident"
         if "construction" in effects:
             a.incident = "construction"
-        a.closed = bool(CLOSING_EFFECTS & set(effects))
+        a.closed = a.closed or bool(CLOSING_EFFECTS & set(effects))
         a.traffic = round(_clamp(a.traffic, 1.0, 5.0), 3)
         a.condition = round(_clamp(a.condition, 1.0, 5.0), 3)
         sc.attrs[e.eid] = a

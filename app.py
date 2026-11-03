@@ -16,6 +16,8 @@ import argparse
 import math
 import os
 import pickle
+import uuid
+from copy import deepcopy
 from typing import Dict, List
 
 import pandas as pd
@@ -35,6 +37,7 @@ import map_coverage
 import path_view
 import simulation
 import visualizer as viz
+from road_edits import PARAMETERS, replay_edits, replace_edit, compare_routes
 
 st.set_page_config(page_title="Dhaka AI Routing", layout="wide",
                    initial_sidebar_state="expanded")
@@ -119,7 +122,8 @@ REGION = "Central demo region (small)"
 def get_base_map_blob(_graph: RoadGraph, _scenario: Scenario, osm_file: str,
                       network: str, scenario_name: str, rev: int,
                       offline: bool, color_mode: str, weights: tuple,
-                      night: bool, limits: tuple) -> bytes:
+                      night: bool, limits: tuple, session_id: str,
+                      simplify: bool) -> bytes:
     """
     The road layer, drawn once and cached as pickled bytes.  Only the arguments
     without a leading underscore form the cache key; ``rev`` changes whenever
@@ -185,6 +189,9 @@ def init_state():
     ss.setdefault("scenario_rev", 0)      # bumped on every road edit
     ss.setdefault("local_edits", [])      # stretches changed in Edit roads
     ss.setdefault("view", None)           # ((lat, lon), zoom) to frame, or None
+    ss.setdefault("map_session_id", uuid.uuid4().hex)
+    ss.setdefault("edit_reference", None)
+    ss.setdefault("replan_comparison", [])
 
 
 init_state()
@@ -254,14 +261,25 @@ st.sidebar.radio("Road colours show", [COLOR_COST, COLOR_TRAFFIC], key="color_mo
 # Everything in the sidebar that changes a route's cost or a search's limits.  When
 # one of them changes, routes computed under the old values are dropped and, if a
 # start and destination are set, recomputed (Auto-run).
+def queue_settings_replan(message: str) -> None:
+    if "pending_replan" not in st.session_state:
+        st.session_state.pending_replan = {
+            "before": dict(st.session_state.results),
+            "trip": (osm_file, network, st.session_state.start, st.session_state.goal),
+        }
+    st.session_state.results = {}
+    st.session_state.previous_routes = {}
+    st.session_state.replan_comparison = []
+    st.session_state.auto_run = True
+    if st.session_state.start is not None and st.session_state.goal is not None:
+        st.session_state.flash = message + " Auto-run recalculates; otherwise press Run."
+
+
 settings_sig = (round(weights.traffic, 4), round(weights.condition, 4),
                 round(weights.safety, 4), bool(night), float(timeout_s),
                 int(exp_budget), int(ids_depth))
 if st.session_state.get("settings_sig") not in (None, settings_sig):
-    st.session_state.results = {}
-    st.session_state.auto_run = True
-    if st.session_state.start is not None and st.session_state.goal is not None:
-        st.session_state.flash = "Settings changed: the routes are recomputed with them."
+    queue_settings_replan("Weights, day/night or search limits changed.")
 st.session_state.settings_sig = settings_sig
 map_style_args = (st.session_state.get("color_mode", COLOR_COST),
                   (round(weights.traffic, 4), round(weights.condition, 4),
@@ -278,18 +296,26 @@ def rebuild_scenario():
     else:
         sc_ = build_scenario(graph, scenario_name, seed=cfg.seed)
     st.session_state.scenario_obj = sc_
+    st.session_state.baseline_scenario = deepcopy(sc_)
     st.session_state.local_edits = []         # stretches the user changed
+    st.session_state.edit_reference = None
+    st.session_state.replan_comparison = []
+    st.session_state.previous_routes = {}
     st.session_state.results = {}
     st.session_state.scenario_rev += 1
 
 
-scenario_sig = (osm_file, network, scenario_name, cfg.seed)
+scenario_sig = (osm_file, network, scenario_name, cfg.seed, simplify)
 if st.session_state.scenario_sig != scenario_sig or st.session_state.scenario_obj is None:
+    previous_sig = st.session_state.scenario_sig
+    if previous_sig is not None and previous_sig[:2] == scenario_sig[:2]:
+        queue_settings_replan("Scenario changed: using its new road conditions.")
     rebuild_scenario()
     st.session_state.scenario_sig = scenario_sig
     st.session_state.view = None
 if st.sidebar.button("↺ Reset road edits", help="Discard closures/edits and "
                      "restore the selected scenario's simulated values."):
+    st.session_state.reset_before = dict(st.session_state.results)
     rebuild_scenario()
     st.session_state.flash = "Road edits reset."
 sc: Scenario = st.session_state.scenario_obj
@@ -315,6 +341,10 @@ def set_point(which: str, node: int, label: str = "") -> None:
     st.session_state[f"{which}_label"] = label     # what the user picked, if anything
     st.session_state.results = {}
     st.session_state.auto_run = True
+    st.session_state.edit_reference = None
+    st.session_state.replan_comparison = []
+    st.session_state.previous_routes = {}
+    st.session_state.pop("pending_replan", None)
 
 
 def _picked(which: str) -> None:
@@ -413,6 +443,37 @@ def run_selected(names: List[str], show_simulation: bool = False) -> None:
             st.session_state.sim_autoplay = True
 
 
+def commit_road_edits(edits, message: str) -> None:
+    """Rebuild edits from a clean snapshot and re-run the same algorithms."""
+    global sc
+    before = dict(st.session_state.results)
+    updated = replay_edits(graph, st.session_state.baseline_scenario, edits)
+    updated.night = night
+    sc = updated
+    st.session_state.scenario_obj = updated
+    st.session_state.local_edits = edits
+    st.session_state.scenario_rev += 1
+    st.session_state.results = {}
+    st.session_state.previous_routes = before
+    if st.session_state.start is not None and st.session_state.goal is not None:
+        names = list(before) or algo_choice or ["A*"]
+        run_selected(names)
+    st.session_state.replan_comparison = compare_routes(
+        before, st.session_state.results, sc, cfg.weights, night)
+    st.session_state.flash = message + " Routes recalculated with the new values."
+    st.rerun()
+
+
+# Reset is handled after run_selected exists, so it also recalculates the routes.
+if "reset_before" in st.session_state:
+    before = st.session_state.pop("reset_before")
+    if before and st.session_state.start is not None and st.session_state.goal is not None:
+        run_selected(list(before))
+        st.session_state.previous_routes = before
+        st.session_state.replan_comparison = compare_routes(
+            before, st.session_state.results, sc, cfg.weights, night)
+
+
 def show_html(page: str, height: int) -> None:
     """Embed a self-contained page we generated (never user-supplied HTML)."""
     if hasattr(st, "iframe"):                 # st.components.v1.html is being removed
@@ -509,10 +570,21 @@ def map_area() -> None:
 
     def trip_layer() -> "folium.FeatureGroup":
         fg = folium.FeatureGroup(name="trip")
+        if st.session_state.get("show_previous_route", True):
+            for old in st.session_state.get("previous_routes", {}).values():
+                if old.found:
+                    coords = [coord for edge in old.edge_path for coord in edge.geometry]
+                    folium.PolyLine(coords, color="#666666", weight=5,
+                                    opacity=0.65, dash_array="8 6",
+                                    interactive=False).add_to(fg)
         for name, res in st.session_state.results.items():
             if res.found:
                 viz.add_route(fg, res.edge_path,
                               color=viz.ROUTE_COLORS.get(name, "#333"), weight=5)
+        edited_ids = {eid for edit in st.session_state.local_edits for eid in edit["eids"]}
+        for eid in edited_ids:
+            folium.PolyLine(graph.edges[eid].geometry, color="#c225c2", weight=7,
+                            opacity=0.8, dash_array="3 7", interactive=False).add_to(fg)
         if st.session_state.start is not None:
             folium.Marker(graph.coord(st.session_state.start),
                           icon=folium.Icon(color="green", icon="play")).add_to(fg)
@@ -621,7 +693,8 @@ def map_area() -> None:
 
     base = load_base_map(get_base_map_blob(
         graph, sc, osm_file, network, scenario_name,
-        st.session_state.scenario_rev, offline, *map_style_args))
+        st.session_state.scenario_rev, offline, *map_style_args,
+        st.session_state.map_session_id, simplify))
     view_pos = st.session_state.view
     try:
         from streamlit_folium import st_folium
@@ -680,6 +753,11 @@ with tab_map:
                               help="Run the selected algorithms as soon as both points are set.")
 
         pending_auto = st.session_state.pop("auto_run", False)
+        pending_change = st.session_state.get("pending_replan")
+        if pending_change and pending_change["trip"] != (
+                osm_file, network, st.session_state.start, st.session_state.goal):
+            st.session_state.pop("pending_replan", None)
+            pending_change = None
         names_to_run = None
         if run_clicked:
             names_to_run = algo_choice or list(ALGORITHMS.keys())
@@ -690,9 +768,17 @@ with tab_map:
             if st.session_state.start == st.session_state.goal:
                 st.info("Start and destination are the same place.")
             else:
-                names_to_run = algo_choice or list(ALGORITHMS.keys())
+                names_to_run = (list(pending_change["before"])
+                                if pending_change and pending_change["before"]
+                                else algo_choice or list(ALGORITHMS.keys()))
         if names_to_run:
             run_selected(names_to_run, show_simulation=run_clicked or all_clicked)
+            if pending_change:
+                before = pending_change["before"]
+                st.session_state.previous_routes = before
+                st.session_state.replan_comparison = compare_routes(
+                    before, st.session_state.results, sc, cfg.weights, night)
+                st.session_state.pop("pending_replan", None)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -706,6 +792,9 @@ with tab_map:
                 st.session_state.results = {}
                 st.session_state.auto_run = True
                 st.session_state.clear_picks = ["pick_start", "pick_goal"]
+                st.session_state.replan_comparison = []
+                st.session_state.previous_routes = {}
+                st.session_state.edit_reference = None
                 st.rerun()
         with c2:
             if st.button("🔄 Reset", width="stretch"):
@@ -714,6 +803,9 @@ with tab_map:
                 st.session_state.results = {}
                 st.session_state.view = None
                 st.session_state.map_view = VIEW_MAP
+                st.session_state.replan_comparison = []
+                st.session_state.previous_routes = {}
+                st.session_state.edit_reference = None
                 st.session_state.clear_picks = ["pick_start", "pick_goal"]
                 st.rerun()
 
@@ -792,217 +884,190 @@ with tab_compare:
 # TAB: EDIT ROADS
 # =========================================================================== #
 with tab_edit:
-    st.subheader("Edit road attributes (simulated scenario)")
-    st.caption("Close a road or change its traffic/condition/safety, then re-run "
-               "to see routes replan. A closed road is excluded by all six algorithms. "
-               "Use 'Reset road edits' in the sidebar to undo.")
+    st.subheader("Change a road and compare the new route")
+    st.caption("Choose one or several parameters. Apply recalculates the algorithms you ran. "
+               "A*/UCS change route only when another route is cheaper. BFS/DFS/IDS react "
+               "to closures, not traffic or safety costs. Incident labels alone do not change cost.")
+    st.checkbox("Show previous routes on Map (grey dashed); edited roads are magenta",
+                value=True, key="show_previous_route")
 
+    comparison = st.session_state.get("replan_comparison")
+    if comparison:
+        st.markdown("**Before / after the last road edit**")
+        st.dataframe(pd.DataFrame(comparison), width="stretch", hide_index=True)
+        st.caption("Compare old_path_at_new_cost with new_path_cost: both use the new "
+                   "road values. An infinite old-path cost means that route is now blocked. "
+                   "If the path is unchanged, the edit may still have changed its cost.")
+
+    current = st.session_state.results
+    reference = st.session_state.get("edit_reference")
+    trip_sig = (osm_file, network, st.session_state.start, st.session_state.goal)
+    if reference and reference["trip"] != trip_sig:
+        reference = None
+        st.session_state.edit_reference = None
+    available = [name for name in ALGORITHMS if name in current and current[name].found]
+    if reference and reference["algorithm"] not in available:
+        available.append(reference["algorithm"])
     candidate_edges = []
-    if st.session_state.results:
-        for name in ("A*", "UCS"):
-            r = st.session_state.results.get(name)
-            if r and r.found:
-                candidate_edges = r.edge_path
-                break
+    if available:
+        if st.session_state.get("edit_algorithm") not in available:
+            st.session_state.edit_algorithm = "A*" if "A*" in available else available[0]
+        edit_algorithm = st.selectbox("Edit the path of algorithm", available,
+                                      key="edit_algorithm")
+        latest = current.get(edit_algorithm)
+        if reference is None or reference["algorithm"] != edit_algorithm:
+            if latest and latest.found:
+                reference = {"trip": trip_sig, "algorithm": edit_algorithm,
+                             "eids": [e.eid for e in latest.edge_path]}
+                st.session_state.edit_reference = reference
+        if st.button("Use this algorithm's latest path for editing",
+                     disabled=not (latest and latest.found)):
+            st.session_state.edit_reference = {
+                "trip": trip_sig, "algorithm": edit_algorithm,
+                "eids": [e.eid for e in latest.edge_path]}
+            st.rerun()
+        if reference:
+            candidate_edges = [graph.edges[eid] for eid in reference["eids"]]
+        st.caption("The selected path stays available after rerouting, so you can change "
+                   "or restore the same road. Use the button above to select the latest path.")
+
     source = st.radio("Pick edge from", ["Part of current route", "Current route",
-                                         "Search by road name"],
-                      horizontal=True)
-    chosen = None
-    if source == "Part of current route":
-        if candidate_edges:
-            # Pick any stretch of the route (default: all of it) by distance
-            # from the start; segments are labelled with their road names.
-            cum, pos = [], 0.0
-            for e in candidate_edges:
-                cum.append(pos)
-                pos += e.length_km
-            marks = [f"{i + 1}. {e.name if not e.name.startswith('(') else 'lane'} "
-                     f"@ {cum[i]:.2f} km" for i, e in enumerate(candidate_edges)]
-            lo_m, hi_m = st.select_slider(
-                "Part of the route to change (start → destination)", options=marks,
-                value=(marks[0], marks[-1]), key="route_range")
-            lo, hi = marks.index(lo_m), marks.index(hi_m)
+                                         "Search by road name"], horizontal=True)
+    part = []
+    label = ""
+    if source == "Part of current route" and candidate_edges:
+        marks, distance = [], 0.0
+        for i, edge in enumerate(candidate_edges):
+            marks.append(f"{i + 1}. {edge.name} @ {distance:.2f} km")
+            distance += edge.length_km
+        route_key = "route_range_" + "_".join(str(e.eid) for e in candidate_edges)
+        if len(marks) == 1:
+            st.write(marks[0])
+            part = candidate_edges
+            lo = hi = 0
+        else:
+            low, high = st.select_slider("Part of the route to change (start to destination)",
+                                        options=marks, value=(marks[0], marks[-1]), key=route_key)
+            lo, hi = marks.index(low), marks.index(high)
             part = candidate_edges[lo:hi + 1]
-            km = sum(e.length_km for e in part)
-            attrs = [sc.get(e.eid) for e in part]
-            avg = lambda f: sum(getattr(a, f) for a in attrs) / len(attrs)
-            roads = sorted({e.name for e in part if not e.name.startswith("(")})
-            st.write(f"**Selected:** segments {lo + 1}–{hi + 1} of "
-                     f"{len(candidate_edges)}, {km:.2f} km"
-                     + (f" ({', '.join(roads[:4])}{' …' if len(roads) > 4 else ''})"
-                        if roads else "")
-                     + ". The values below are set on every selected segment "
-                       "(current averages shown).")
-
-            # ---- Conditions: add or remove each one on this part only ----
-            st.markdown("**Conditions on this part** (tick to add, untick to "
-                        "remove; applied in both directions of the road)")
-            effects = st.pills("Conditions", list(LOCAL_EFFECTS),
-                               format_func=LOCAL_EFFECTS.get,
-                               selection_mode="multi", key="route_effects",
-                               label_visibility="collapsed") or []
-            closes = CLOSING_EFFECTS & set(effects)
-            st.caption("Values = this road's normal-day values + the ticked "
-                       "conditions. Nothing ticked = plain normal day."
-                       + (" ⛔ The part will be **closed**: every algorithm "
-                          "must go around it." if closes else ""))
-            if st.button("Apply conditions to this part", type="primary"):
-                both = with_reverse(graph, part)
-                apply_local_conditions(sc, both, set(effects), seed=cfg.seed)
-                st.session_state.local_edits.append({
-                    "label": (f"segments {lo + 1}–{hi + 1}, {km:.2f} km"
-                              + (f" ({', '.join(roads[:2])})" if roads else "")),
-                    "eids": [e.eid for e in both],
-                    "effects": list(effects),
-                })
-                st.session_state.scenario_rev += 1
-                st.session_state.results = {}
-                what = ", ".join(LOCAL_EFFECTS[x] for x in effects) or "normal day"
-                st.session_state.flash = (f"{what} → {len(part)} segment(s), "
-                                          f"{km:.2f} km. Press ▶ Run to see the new route.")
-                st.rerun()
-
-            st.markdown("**Or set the numbers by hand**")
-            w1, w2 = st.columns(2)
-            with w1:
-                rt = st.slider("Traffic T (1 = free, 5 = jam)", 1.0, 5.0,
-                               round(avg("traffic"), 1), 0.1, key="route_t")
-                rc = st.slider("Condition C (1 = good, 5 = broken)", 1.0, 5.0,
-                               round(avg("condition"), 1), 0.1, key="route_c")
-            with w2:
-                rsd = st.slider("Safety day (1 = safe, 4 = risky)", 1.0, 4.0,
-                                round(avg("safety_day"), 1), 0.1, key="route_sd")
-                rsn = st.slider("Safety night (1 = safe, 4 = risky)", 1.0, 4.0,
-                                round(avg("safety_night"), 1), 0.1, key="route_sn")
-            if st.button("Apply to the selected part"):
-                for e in part:
-                    sc.set_attr(e.eid, traffic=rt, condition=rc,
-                                safety_day=rsd, safety_night=rsn)
-                st.session_state.scenario_rev += 1
-                st.session_state.results = {}
-                st.session_state.flash = (
-                    f"Applied to {len(part)} segment(s), {km:.2f} km of the route. "
-                    f"Run again: if the route got worse, the search may now pick "
-                    f"another way.")
-                st.rerun()
-        else:
-            st.info("Run UCS or A* to a destination first.")
-
-        # Every stretch changed with conditions stays listed here, even after
-        # the route moves away from it, so it can be removed again.
-        edits = st.session_state.get("local_edits") or []
-        if edits:
-            st.markdown("**Your changed stretches**")
-            for i, ed in enumerate(edits):
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    what = ", ".join(LOCAL_EFFECTS[x] for x in ed["effects"]) or "normal day"
-                    st.write(f"{i + 1}. {ed['label']}: {what}")
-                with c2:
-                    if st.button("Remove", key=f"rm_edit_{i}"):
-                        with st.spinner("Restoring the scenario's values …"):
-                            orig = (manual_scenario(graph, night=night, seed=cfg.seed)
-                                    if scenario_name == "manual" else
-                                    build_scenario(graph, scenario_name, seed=cfg.seed))
-                        for eid in ed["eids"]:
-                            sc.attrs[eid] = orig.attrs[eid]
-                        edits.pop(i)
-                        # Re-apply the remaining edits in order, in case
-                        # one of them overlaps the stretch just restored.
-                        for other in edits:
-                            apply_local_conditions(
-                                sc, [graph.edges[x] for x in other["eids"]],
-                                set(other["effects"]), seed=cfg.seed)
-                        st.session_state.scenario_rev += 1
-                        st.session_state.results = {}
-                        st.session_state.flash = (f"Removed. Those roads are back to "
-                                                  f"the '{scenario_name}' values. "
-                                                  f"Press ▶ Run again.")
-                        st.rerun()
-    elif source == "Current route":
-        if candidate_edges:
-            opts = {f"{e.name} [{e.u}->{e.v}] {e.length_km:.3f} km (eid {e.eid})": e
-                    for e in candidate_edges}
-            key = st.selectbox("Route edge", list(opts))
-            chosen = opts.get(key)
-        else:
-            st.info("Run UCS or A* to a destination first, or search by road name.")
-    else:
-        q = st.text_input("Road name contains", "")
+        label = f"{edit_algorithm}: segments {lo + 1} to {hi + 1}"
+    elif source == "Current route" and candidate_edges:
+        options = {f"{i + 1}. {e.name} [{e.u} to {e.v}] (eid {e.eid})": e
+                   for i, e in enumerate(candidate_edges)}
+        selected = st.selectbox("Route edge", list(options))
+        part = [options[selected]]
+        label = selected
+    elif source == "Search by road name":
+        query = st.text_input("Road name contains", "")
         matches = [e for e in graph.edges.values()
-                   if q and q.lower() in e.name.lower()][:200]
+                   if query and query.casefold() in e.name.casefold()][:200]
         if matches:
-            opts = {f"{e.name} [{e.u}->{e.v}] (eid {e.eid})": e for e in matches}
-            key = st.selectbox("Matching edge", list(opts))
-            chosen = opts.get(key)
-        elif q:
+            options = {f"{e.name} [{e.u} to {e.v}] (eid {e.eid})": e for e in matches}
+            selected = st.selectbox("Matching edge", list(options))
+            part, label = [options[selected]], selected
+        elif query:
             st.info("No matching named roads.")
-
-    if chosen is not None:
-        a = sc.get(chosen.eid)
-        st.write(f"**{chosen.name}** · {chosen.highway} · {chosen.length_km:.3f} km")
-        e1, e2, e3 = st.columns(3)
-        with e1:
-            new_t = st.slider("Traffic T", 1.0, 5.0, float(a.traffic), 0.1,
-                              key=f"t_{chosen.eid}")
-            new_c = st.slider("Condition C", 1.0, 5.0, float(a.condition), 0.1,
-                              key=f"c_{chosen.eid}")
-        with e2:
-            new_sd = st.slider("Safety day", 1.0, 4.0, float(a.safety_day), 0.1,
-                               key=f"sd_{chosen.eid}")
-            new_sn = st.slider("Safety night", 1.0, 4.0, float(a.safety_night), 0.1,
-                               key=f"sn_{chosen.eid}")
-        with e3:
-            new_closed = st.checkbox("Closed", value=a.closed, key=f"cl_{chosen.eid}")
-            new_inc = st.selectbox("Incident", ["", "flood", "construction",
-                                                "accident", "other"],
-                                   index=(["", "flood", "construction", "accident",
-                                           "other"].index(a.incident)
-                                          if a.incident in ("", "flood", "construction",
-                                                            "accident", "other")
-                                          else 4),
-                                   key=f"inc_{chosen.eid}")
-        if st.button("Apply to this edge"):
-            sc.set_attr(chosen.eid, traffic=new_t, condition=new_c,
-                        safety_day=new_sd, safety_night=new_sn,
-                        closed=new_closed, incident=new_inc)
-            st.session_state.scenario_rev += 1
-            st.session_state.results = {}
-            st.session_state.flash = "Applied. Run the searches again to see the effect."
-            st.rerun()
-        if st.button("Close this road (both directions)"):
-            n = sc.close_road_both_directions(graph, chosen.u, chosen.v)
-            st.session_state.scenario_rev += 1
-            st.session_state.results = {}
-            st.session_state.flash = f"Closed {n} directed edge(s). Run again to replan."
-            st.rerun()
-
-    st.divider()
-    st.subheader("Incident → replan from current position (demo)")
-    if candidate_edges:
-        # Use the route edge nearest the middle whose start junction has another
-        # open exit; blocking the only exit of a one-way road just traps the car.
-        half = len(candidate_edges) // 2
-        by_closeness = sorted(range(len(candidate_edges)), key=lambda i: abs(i - half))
-        prob_now = build_problem()
-        mid = next((candidate_edges[i] for i in by_closeness
-                    if len(prob_now.successors(candidate_edges[i].u)) >= 2),
-                   candidate_edges[half])
-        st.write(f"The vehicle is assumed to be at junction **{mid.u}**, about halfway "
-                 f"along the current route, and the road ahead "
-                 f"(**{mid.name}**) gets blocked.")
-        if st.button("Block the road ahead and replan from here"):
-            sc.set_closed(mid.eid, True)
-            st.session_state.scenario_rev += 1
-            st.session_state.start = mid.u
-            run_selected(["UCS", "A*"], show_simulation=True)
-            st.session_state.flash = ("Blocked the road ahead and replanned UCS and "
-                                      "A* from the vehicle's current position.")
-            st.rerun()
     else:
-        st.info("Run UCS or A* to a destination first.")
+        st.info("Run any algorithm that finds a route first, or search by road name.")
+
+    if part:
+        both = st.checkbox("Apply to both directions of the same road", value=True,
+                           key="edit_both_directions")
+        targets = with_reverse(graph, part) if both else part
+        ids = [e.eid for e in targets]
+        scope = "_".join(map(str, sorted(ids)))
+        # Changing selected roads/revision resets values instead of carrying old slider values.
+        widget_scope = scope + "_" + str(st.session_state.scenario_rev)
+        st.write(f"**Selected:** {len(part)} segment(s), "
+                 f"{sum(e.length_km for e in part):.3f} km; "
+                 f"{len(targets)} directed edge(s) will be updated.")
+        st.dataframe(pd.DataFrame([{
+            "edge": e.eid, "road": e.name, "direction": f"{e.u} to {e.v}",
+            "traffic": sc.get(e.eid).traffic, "condition": sc.get(e.eid).condition,
+            "safety_day": sc.get(e.eid).safety_day,
+            "safety_night": sc.get(e.eid).safety_night,
+            "closed": sc.get(e.eid).closed, "incident": sc.get(e.eid).incident,
+        } for e in targets]), width="stretch", hide_index=True)
+
+        st.markdown("**Apply individual parameters or several together**")
+        fields = st.multiselect("Parameters to change", list(PARAMETERS),
+                                 format_func=PARAMETERS.get, default=["traffic"],
+                                 key="parameter_fields_" + scope)
+        values = {}
+        for field in fields:
+            key = "road_value_" + field + "_" + widget_scope
+            if field == "closed":
+                values[field] = st.checkbox("Close selected road",
+                    value=all(sc.get(e.eid).closed for e in targets), key=key)
+            elif field == "incident":
+                values[field] = st.selectbox("Incident label (visual only)",
+                                             ["", "flood", "construction", "accident", "other"], key=key)
+            else:
+                upper = 5.0 if field in {"traffic", "condition"} else 4.0
+                average = sum(getattr(sc.get(e.eid), field) for e in targets) / len(targets)
+                values[field] = st.slider(PARAMETERS[field], 1.0, upper,
+                                          round(average, 1), 0.1, key=key)
+        st.caption("Only the selected parameters change; every other value on each road "
+                   "stays as it is. Night safety affects cost only when Night-time is on, "
+                   "and a parameter with zero weight cannot change the route cost.")
+        if st.button("Apply parameters and replan", type="primary", disabled=not fields):
+            edit = {"kind": "values", "label": label, "eids": ids, "values": values}
+            commit_road_edits(replace_edit(st.session_state.local_edits, edit),
+                              "Selected parameters applied.")
+
+        st.markdown("**Or combine road conditions**")
+        previous = next((ed for ed in reversed(st.session_state.local_edits)
+                         if ed["kind"] == "conditions" and set(ed["eids"]) == set(ids)), None)
+        effects = st.multiselect("Conditions on this part", list(LOCAL_EFFECTS),
+                                 format_func=LOCAL_EFFECTS.get,
+                                 default=previous["effects"] if previous else [],
+                                 key="effects_" + widget_scope)
+        st.caption("Conditions use this scenario's original values plus the selected effects. "
+                   "Untick a condition and apply to remove it. An empty selection removes "
+                   "this condition edit. Rain/flood/accident presets change the relevant values; "
+                   "deep flood, construction and road closed block the selected road.")
+        if st.button("Apply conditions and replan"):
+            edit = {"kind": "conditions", "label": label, "eids": ids,
+                    "effects": list(effects)}
+            commit_road_edits(replace_edit(st.session_state.local_edits, edit),
+                              "Road conditions updated.")
+
+    edits = st.session_state.local_edits
+    if edits:
+        st.markdown("**Your road edits: remove any edit to restore its values**")
+        for index, edit in enumerate(edits):
+            left, right = st.columns([4, 1])
+            detail = (", ".join(LOCAL_EFFECTS[e] for e in edit["effects"])
+                      if edit["kind"] == "conditions" else
+                      ", ".join(f"{PARAMETERS[k]} = {v}" for k, v in edit["values"].items()))
+            left.write(f"{index + 1}. {edit['label']}: {detail}")
+            if right.button("Remove", key=f"rm_edit_{index}"):
+                commit_road_edits(edits[:index] + edits[index + 1:], "Road edit removed.")
 
     st.divider()
+    st.subheader("Incident: replan from current position (demo)")
+    # The vehicle belongs to the latest successful route, not the saved edit reference.
+    latest_path = next((current[n].edge_path for n in ("A*", "UCS", "GBFS", "BFS", "DFS", "IDS")
+                        if n in current and current[n].found), [])
+    if latest_path:
+        half = len(latest_path) // 2
+        prob_now = build_problem()
+        mid = next((latest_path[i] for i in sorted(range(len(latest_path)), key=lambda i: abs(i - half))
+                    if len({e.v for e in prob_now.successors(latest_path[i].u)}) >= 2),
+                   latest_path[half])
+        st.write(f"Vehicle at junction {mid.u}; the road ahead ({mid.name}) closes.")
+        if st.button("Block the road ahead and replan from here"):
+            st.session_state.start = mid.u
+            st.session_state.start_label = ""
+            st.session_state.clear_picks = ["pick_start"]
+            st.session_state.edit_reference = None
+            # The origin changed; a before/after comparison of different trips is invalid.
+            st.session_state.results = {}
+            edit = {"kind": "values", "label": f"Road ahead: {mid.name}",
+                    "eids": [mid.eid], "values": {"closed": True}}
+            commit_road_edits(replace_edit(edits, edit), "Road ahead closed; replanned from the vehicle.")
+    else:
+        st.info("Run an algorithm that finds a route to show the incident demo.")
     st.write("Scenario snapshot stats:")
     st.json(scenario_stats(graph, sc))
 

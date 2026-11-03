@@ -1,5 +1,9 @@
 # প্রজেক্টের পূর্ণ ব্যাখ্যা (বাংলায়)
 
+> নির্দিষ্ট algorithm-এর পথের একটি রাস্তা বা কয়েকটি অংশে এক/একাধিক parameter
+> বদলে Apply, automatic replan, before/after এবং undo দেখানোর বর্তমান নিয়ম:
+> [ROAD_EDIT_DEMO.md](ROAD_EDIT_DEMO.md)।
+
 **Intelligent Vehicle Routing in Dhaka Using Classical AI Search Under Dynamic Road Conditions**
 
 এই গাইড পড়ে তুমি প্রজেক্টের প্রতিটা অংশ নিজে বুঝবে এবং স্যারকে বোঝাতে পারবে। সব সংখ্যা আসল run থেকে নেওয়া (`outputs/` ফোল্ডারে আছে)।
@@ -320,7 +324,7 @@ py -3.12 -m streamlit run app.py -- --osm "$HOME/Downloads/dhaka_central_roads.o
 | `visualizer.py` | ম্যাপ, চার্ট, offline replay |
 | `simulation.py` | আসল ম্যাপে সব algorithm এর একসাথে simulation |
 | `app.py` | Streamlit dashboard |
-| `tests/test_core.py` | ২১টা correctness test (`py -3.12 -m pytest`) |
+| `tests/` | core, road edit এবং dashboard workflow test (`py -3.12 -m pytest`) |
 | `REPORT.md` | ইংরেজিতে academic report |
 
-**সব ঠিক আছে কিনা দেখাতে:** `py -3.12 -m pytest -q` চালাও, দেখাবে **21 passed**।
+**সব ঠিক আছে কিনা দেখাতে:** `py -3.12 -m pytest -q` চালাও। এতে core algorithm, parameter edit, undo এবং আসল road graph-সহ dashboard flow পরীক্ষা হয়।

@@ -49,7 +49,7 @@ dhaka-routing-ai/
 ├── path_view.py           # one algorithm's path, node by node, beside the map
 ├── requirements.txt
 ├── README.md / REPORT.md / DEMO.md / VIVA.md
-├── tests/test_core.py     # 23 correctness tests on tiny synthetic graphs
+├── tests/                # core, removable road edits and dashboard workflow tests
 └── outputs/               # benchmark CSVs, charts, example map and replay
 ```
 
@@ -121,7 +121,13 @@ Using the app:
    it listed in order beside the map (road name, km from the start). Point at
    a node in the list to see it on the map; click to zoom. Running a single
    algorithm with **▶ Run** opens this view by itself.
-7. In **Edit roads**, pick any stretch of the current route (**Part of current
+7. For the current parameter-editing workflow, see [ROAD_EDIT_DEMO.md](ROAD_EDIT_DEMO.md).
+   Select the path of any algorithm, choose a single road or a route stretch,
+   select one or several parameters, and press **Apply parameters and replan**.
+   Only selected parameters change; searches rerun automatically. The editor
+   retains the original road selection after rerouting. Before/after metrics,
+   previous-route overlays and removable edits show exactly what changed.
+   Alternatively, pick any stretch of the current route (**Part of current
    route**, by default all of it) and raise or lower its traffic, condition and
    safety at once, or tick conditions for that stretch only (road closed, rush hour, rain,
    flood, deep flood = closed, construction = closed, accident, night) and
@@ -155,7 +161,7 @@ loading, rendering and export.
 ## 6. Run the tests
 
 ```bash
-pytest -q          # 23 tests on tiny synthetic graphs
+pytest -q          # core, road-edit regression and real-OSM dashboard tests
 ```
 
 ---
