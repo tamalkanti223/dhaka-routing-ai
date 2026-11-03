@@ -61,11 +61,14 @@ def map_file_options() -> List[str]:
         os.path.expanduser("~/Downloads/dhaka_central_roads.osm"),
         config.BUNDLED_OSM_FILE,
     ]
+    # The same map can exist in two places (Downloads and the bundled data/ copy);
+    # list each file name once, preferring the earlier path.
     seen, out = set(), []
     for p in candidates:
         p = os.path.abspath(p)
-        if p not in seen and os.path.exists(p):
-            seen.add(p)
+        name = os.path.basename(p).lower()
+        if name not in seen and os.path.exists(p):
+            seen.add(name)
             out.append(p)
     return out or [CLI.osm]
 
