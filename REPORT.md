@@ -23,8 +23,9 @@ The map is a local OSM XML extract of central Dhaka
 (`dhaka_central_roads.osm`, latitude 23.67–23.86, longitude 90.29–90.49),
 exported from OpenStreetMap through the Overpass API (ODbL licence). It is
 parsed with the Python standard library (`xml.etree.iterparse`), so loading
-works fully offline. A larger extract, `dhaka_greater_metro_roads.osm`, which
-also covers the north (Uttara, the airport), can be selected in the dashboard.
+works fully offline. The extract covers central Dhaka, about 21 km x 21 km
+(latitude 23.67 to 23.86, longitude 90.29 to 90.49); outer areas such as Savar,
+Tongi, Gazipur and Narayanganj are not included.
 
 **Construction pipeline and measured counts** (central extract):
 

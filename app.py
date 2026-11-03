@@ -58,7 +58,6 @@ def map_file_options() -> List[str]:
     candidates = [
         os.path.abspath(os.path.expanduser(CLI.osm)),
         os.path.expanduser("~/Downloads/dhaka_central_roads.osm"),
-        os.path.expanduser("~/Downloads/dhaka_greater_metro_roads.osm"),
         config.BUNDLED_OSM_FILE,
     ]
     seen, out = set(), []
@@ -177,8 +176,7 @@ st.sidebar.caption("Classical AI search on a real OpenStreetMap road network")
 
 osm_file = st.sidebar.selectbox(
     "Map file", map_file_options(), format_func=os.path.basename,
-    help="dhaka_central_roads covers central Dhaka only; "
-         "dhaka_greater_metro_roads also covers the north (Uttara, airport).")
+    help="Central Dhaka road extract from OpenStreetMap.")
 simplify = not CLI.no_simplify
 network = st.sidebar.radio(
     "Network", [FULL, REGION],

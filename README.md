@@ -89,9 +89,10 @@ The `--` separates Streamlit's flags from the app's own flags:
 | `--osm PATH` | use a different `.osm` file |
 | `--no-simplify` | keep every OSM shape node (bigger, slower graph) |
 
-If `~/Downloads/dhaka_greater_metro_roads.osm` exists, the sidebar's **Map
-file** list also offers it. It covers north Dhaka (Uttara, the airport), which
-the central extract does not.
+The map is the central-Dhaka extract (`data/dhaka_central_roads.osm`), about
+21 km x 21 km: from Mirpur and the southern edge of Uttara down to Old Dhaka
+and Jatrabari, and from Mohammadpur east to Badda, Rampura and Khilgaon.
+Outer areas such as Savar, Tongi, Gazipur and Narayanganj are not included.
 
 Using the app:
 1. **Network:** *Full network* (whole map file) or the small *Central demo
