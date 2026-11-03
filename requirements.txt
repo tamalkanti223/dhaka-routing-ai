@@ -1,0 +1,14 @@
+# Dashboard + visualization (versions this project was built and tested with)
+streamlit==1.66.1
+streamlit-folium==0.27.4
+folium>=0.20
+plotly>=5.20
+pandas>=2.0
+matplotlib>=3.7
+
+# Testing (not needed to run the app)
+pytest>=8.0
+
+# NOTE: graph loading uses only the Python standard library (xml.etree), so the
+# road network loads and all six search algorithms run with NO internet access.
+# Map tiles and the Leaflet script come from the internet; an offline chart mode exists.
