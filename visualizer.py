@@ -117,10 +117,43 @@ def _line(geometry, tol: float = 0.0) -> List[List[float]]:
 DISPLAY_TOL_DEG = 0.00005   # ~5 m: invisible at street zoom, halves the points
 
 
-def add_roads(m, graph: RoadGraph, scenario: Scenario, max_edges: int = 9000,
-              include_minor: bool = True):
+def cost_factor(attr, weights, night: bool) -> float:
     """
-    Draw roads coloured by their simulated condition.
+    The route-cost multiplier of one road under the active settings: the same
+    ``1 + wT(T-1) + wC(C-1) + wS(S-1)`` the search uses (>= 1; 1 = free-flowing,
+    good surface, safe).  ``weights`` is (wT, wC, wS).
+    """
+    return (1.0 + weights[0] * (attr.traffic - 1.0) + weights[1] * (attr.condition - 1.0)
+            + weights[2] * (attr.safety(night) - 1.0))
+
+
+COST_BINS = ((3.0, "#d62728", 2.5, 0.6), (2.0, "#ff7f0e", 2.0, 0.5),
+             (1.4, "#bcbd22", 1.6, 0.45), (0.0, "#2ca02c", 1.2, 0.4))
+
+
+def _cost_style(attr, weights, night: bool) -> Tuple[str, float, float]:
+    """(color, weight, opacity) from the cost factor; closures/incidents keep their colours."""
+    if attr.closed:
+        return "#000000", 4, 0.9
+    if attr.incident == "flood":
+        return "#1f77b4", 3, 0.7
+    if attr.incident == "construction":
+        return "#7f7f7f", 3, 0.7
+    if attr.incident == "accident":
+        return "#e377c2", 3, 0.8
+    f = cost_factor(attr, weights, night)
+    for floor, color, width, opacity in COST_BINS:
+        if f >= floor:
+            return color, width, opacity
+    return COST_BINS[-1][1:]
+
+
+def add_roads(m, graph: RoadGraph, scenario: Scenario, max_edges: int = 9000,
+              include_minor: bool = True, weights=None, night: bool = False):
+    """
+    Draw roads coloured by their simulated condition: by the route-cost factor
+    when ``weights`` (wT, wC, wS) is given (so the colours follow the sliders,
+    the day/night switch and the scenario), otherwise by traffic alone.
 
     Roads that share a style are sent to the browser as ONE multi-line layer
     (about ten layers in total, not thousands), with no hover tooltips and not
@@ -145,7 +178,9 @@ def add_roads(m, graph: RoadGraph, scenario: Scenario, max_edges: int = 9000,
         for e in group:
             if drawn >= max_edges:
                 break
-            color, weight, opacity = _edge_style(e, scenario.get(e.eid))
+            a = scenario.get(e.eid)
+            color, weight, opacity = (_cost_style(a, weights, night) if weights
+                                      else _edge_style(e, a))
             buckets.setdefault((color, weight, opacity), []).append(
                 _line(e.geometry, DISPLAY_TOL_DEG))
             drawn += 1
@@ -219,9 +254,31 @@ LEGEND_HTML = """
 """
 
 
-def add_legend(m):
+def build_legend(settings=None, cost_mode: bool = False) -> str:
+    """Legend box; with ``settings`` (list of text lines) it also lists the active settings."""
+    rows = LEGEND_HTML.split(chr(10))
+    if cost_mode:
+        a = next(i for i, r in enumerate(rows) if "low traffic" in r)
+        b = next(i for i, r in enumerate(rows) if "severe" in r)
+        sw = '<span style="color:%s;">&#9644;</span> %s'
+        rows[a:b + 1] = [
+            "Road colour = cost per km<br>",
+            sw % ("#2ca02c", "&lt;1.4&times;") + "&nbsp;"
+            + sw % ("#bcbd22", "1.4&ndash;2&times;") + "&nbsp;"
+            + sw % ("#ff7f0e", "2&ndash;3&times;") + "&nbsp;"
+            + sw % ("#d62728", "&ge;3&times;") + "<br>"]
+    html = chr(10).join(rows)
+    if settings:
+        box = ("<hr style='margin:4px 0'><b>Active settings</b><br>"
+               + "<br>".join(settings))
+        html = html.replace("</div>", box + "</div>", 1)
+    return html
+
+
+
+def add_legend(m, settings=None, cost_mode: bool = False):
     import folium
-    m.get_root().html.add_child(folium.Element(LEGEND_HTML))
+    m.get_root().html.add_child(folium.Element(build_legend(settings, cost_mode)))
 
 
 # --------------------------------------------------------------------------- #

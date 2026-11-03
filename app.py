@@ -109,6 +109,8 @@ def get_node_names(osm_file: str, simplify: bool, network: str) -> Dict[int, str
     return {n: label[2:].split(" — ")[0] for label, n in junctions.items()}
 
 
+COLOR_COST = "Total route cost (follows my weights)"
+COLOR_TRAFFIC = "Traffic only"
 FULL = "Full network (whole map file)"
 REGION = "Central demo region (small)"
 
@@ -116,7 +118,8 @@ REGION = "Central demo region (small)"
 @st.cache_resource(show_spinner="Drawing roads …", max_entries=6)
 def get_base_map_blob(_graph: RoadGraph, _scenario: Scenario, osm_file: str,
                       network: str, scenario_name: str, rev: int,
-                      offline: bool) -> bytes:
+                      offline: bool, color_mode: str, weights: tuple,
+                      night: bool, limits: tuple) -> bytes:
     """
     The road layer, drawn once and cached as pickled bytes.  Only the arguments
     without a leading underscore form the cache key; ``rev`` changes whenever
@@ -128,9 +131,17 @@ def get_base_map_blob(_graph: RoadGraph, _scenario: Scenario, osm_file: str,
     an unchanged map: it keeps the user's pan/zoom and only swaps the trip layer.
     """
     m = viz.base_map(_graph, offline=offline, zoom=13 if network == REGION else 12)
+    cost = color_mode == COLOR_COST
     viz.add_roads(m, _graph, _scenario, max_edges=9000,
-                  include_minor=(network == REGION))
-    viz.add_legend(m)
+                  include_minor=(network == REGION),
+                  weights=weights if cost else None, night=night)
+    viz.add_legend(m, settings=[
+        f"Network: {'central demo region' if network == REGION else 'full network'} "
+        f"({_graph.num_nodes():,} nodes)",
+        f"Scenario: {scenario_name}, {'night' if night else 'day'}",
+        f"Weights: wT {weights[0]:.2f} · wC {weights[1]:.2f} · wS {weights[2]:.2f}",
+        f"Limits: {limits[0]:g} s · {limits[1]:,} expansions · IDS depth {limits[2]}",
+    ], cost_mode=cost)
     return pickle.dumps((m, m.get_bounds()), protocol=pickle.HIGHEST_PROTOCOL)
 
 
@@ -236,6 +247,26 @@ cfg = config.AppConfig(osm_file=osm_file, weights=weights, limits=limits)
 st.sidebar.subheader("Display")
 st.sidebar.slider("Map height (px)", 380, 1000, 540, 20, key="map_height",
                   help="Make the map taller on a big screen, shorter on a small laptop.")
+st.sidebar.radio("Road colours show", [COLOR_COST, COLOR_TRAFFIC], key="color_mode",
+                 help="Total cost uses your weights, the day/night switch and the "
+                      "scenario, so the colours change when you change them.")
+
+# Everything in the sidebar that changes a route's cost or a search's limits.  When
+# one of them changes, routes computed under the old values are dropped and, if a
+# start and destination are set, recomputed (Auto-run).
+settings_sig = (round(weights.traffic, 4), round(weights.condition, 4),
+                round(weights.safety, 4), bool(night), float(timeout_s),
+                int(exp_budget), int(ids_depth))
+if st.session_state.get("settings_sig") not in (None, settings_sig):
+    st.session_state.results = {}
+    st.session_state.auto_run = True
+    if st.session_state.start is not None and st.session_state.goal is not None:
+        st.session_state.flash = "Settings changed: the routes are recomputed with them."
+st.session_state.settings_sig = settings_sig
+map_style_args = (st.session_state.get("color_mode", COLOR_COST),
+                  (round(weights.traffic, 4), round(weights.condition, 4),
+                   round(weights.safety, 4)), bool(night),
+                  (float(timeout_s), int(exp_budget), int(ids_depth)))
 
 
 # --------------------------------------------------------------------------- #
@@ -590,7 +621,7 @@ def map_area() -> None:
 
     base = load_base_map(get_base_map_blob(
         graph, sc, osm_file, network, scenario_name,
-        st.session_state.scenario_rev, offline))
+        st.session_state.scenario_rev, offline, *map_style_args))
     view_pos = st.session_state.view
     try:
         from streamlit_folium import st_folium
@@ -607,9 +638,11 @@ def map_area() -> None:
         full = viz.base_map(graph, offline=offline,
                             zoom=13 if network == REGION else 12)
         viz.add_roads(full, graph, sc, max_edges=9000,
-                      include_minor=(network == REGION))
+                      include_minor=(network == REGION),
+                      weights=map_style_args[1] if map_style_args[0] == COLOR_COST else None,
+                      night=night)
         trip_layer().add_to(full)
-        viz.add_legend(full)
+        viz.add_legend(full, cost_mode=map_style_args[0] == COLOR_COST)
         st.download_button("⬇ Download route_map.html",
                            full.get_root().render().encode("utf-8"),
                            file_name="route_map.html", mime="text/html")

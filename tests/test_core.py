@@ -428,6 +428,27 @@ def test_map_coverage_reports_extent_extremes_and_area_status():
     html = mc.build_html(g, info)
     assert "dashArray" in html or "dash_array" in html or "8 6" in html
 
+def test_road_colour_follows_the_weights_the_night_switch_and_closures():
+    import visualizer as viz
+    jam = EdgeAttr(traffic=4.0, condition=1.0, safety_day=1.0, safety_night=3.0)
+    # the same jammed road: costly when traffic matters, cheap when only surface matters
+    assert viz._cost_style(jam, (1.0, 0.0, 0.0), False)[0] == "#d62728"
+    assert viz._cost_style(jam, (0.0, 1.0, 0.0), False)[0] == "#2ca02c"
+    # night uses the night safety value: only the safety weight sees the difference
+    assert viz.cost_factor(jam, (0.0, 0.0, 1.0), True) > viz.cost_factor(jam, (0.0, 0.0, 1.0), False)
+    assert viz.cost_factor(jam, (1.0, 0.0, 0.0), True) == viz.cost_factor(jam, (1.0, 0.0, 0.0), False)
+    # same formula as the search cost: factor * length == edge_cost
+    g = make_graph(COORDS, [(1, 2, 1.0, False)])
+    e = next(iter(g.edges.values()))
+    assert math.isclose(edge_cost(e, jam, W, True),
+                        e.length_km * viz.cost_factor(jam, (W.traffic, W.condition, W.safety), True))
+    # closures and incidents keep their own colours whatever the weights are
+    assert viz._cost_style(EdgeAttr(closed=True), (0.0, 1.0, 0.0), False)[0] == "#000000"
+    assert viz._cost_style(EdgeAttr(incident="flood"), (1.0, 0.0, 0.0), False)[0] == "#1f77b4"
+    # the legend states the active settings
+    html = viz.build_legend(["Scenario: rush_hour, night"], cost_mode=True)
+    assert "Active settings" in html and "rush_hour" in html and "cost per km" in html
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
